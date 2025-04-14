@@ -1,5 +1,5 @@
 import { type NextRequest, NextResponse } from "next/server"
-import { db } from "@/lib/db"
+import { pool } from "@/lib/db"
 import { users } from "@/lib/schema"
 import { eq } from "drizzle-orm"
 import { z } from "zod"
@@ -18,17 +18,14 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
   try {
     const id = Number.parseInt(params.id)
 
-    const user = await db
-      .select({
-        id: users.id,
-        name: users.name,
-        email: users.email,
-        role: users.role,
-        createdAt: users.createdAt,
-      })
-      .from(users)
-      .where(eq(users.id, id))
-      .then((res) => res[0])
+    const user = await pool
+      .query(
+        `SELECT id, name, email, role, "createdAt" 
+         FROM users 
+         WHERE id = $1`,
+        [id]
+      )
+      .then((res) => res.rows[0])
 
     if (!user) {
       return NextResponse.json(
@@ -66,11 +63,9 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
     const validatedData = updateUserSchema.parse(body)
 
     // Проверка существования пользователя
-    const existingUser = await db
-      .select()
-      .from(users)
-      .where(eq(users.id, id))
-      .then((res) => res[0])
+    const existingUser = await pool
+      .query('SELECT * FROM users WHERE id = $1', [id])
+      .then((res) => res.rows[0])
 
     if (!existingUser) {
       return NextResponse.json(
@@ -84,11 +79,9 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
 
     // Проверка email на уникальность, если он изменяется
     if (validatedData.email && validatedData.email !== existingUser.email) {
-      const emailExists = await db
-        .select()
-        .from(users)
-        .where(eq(users.email, validatedData.email))
-        .then((res) => res[0])
+      const emailExists = await pool
+        .query('SELECT * FROM users WHERE email = $1', [validatedData.email])
+        .then((res) => res.rows[0])
 
       if (emailExists) {
         return NextResponse.json(
@@ -108,20 +101,25 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
     }
 
     // Обновление пользователя
-    const [updatedUser] = await db
-      .update(users)
-      .set({
-        ...updateData,
-        updatedAt: new Date(),
-      })
-      .where(eq(users.id, id))
-      .returning({
-        id: users.id,
-        name: users.name,
-        email: users.email,
-        role: users.role,
-        createdAt: users.createdAt,
-      })
+    const [updatedUser] = await pool
+      .query(
+        `UPDATE users 
+         SET name = COALESCE($1, name),
+             email = COALESCE($2, email),
+             password = COALESCE($3, password),
+             role = COALESCE($4, role),
+             "updatedAt" = NOW()
+         WHERE id = $5
+         RETURNING id, name, email, role, "createdAt"`,
+        [
+          updateData.name,
+          updateData.email,
+          updateData.password,
+          updateData.role,
+          id
+        ]
+      )
+      .then((res) => res.rows)
 
     return NextResponse.json({
       success: true,
@@ -156,11 +154,9 @@ export async function DELETE(request: NextRequest, { params }: { params: { id: s
     const id = Number.parseInt(params.id)
 
     // Проверка существования пользователя
-    const existingUser = await db
-      .select()
-      .from(users)
-      .where(eq(users.id, id))
-      .then((res) => res[0])
+    const existingUser = await pool
+      .query('SELECT * FROM users WHERE id = $1', [id])
+      .then((res) => res.rows[0])
 
     if (!existingUser) {
       return NextResponse.json(
@@ -174,11 +170,9 @@ export async function DELETE(request: NextRequest, { params }: { params: { id: s
 
     // Проверка, не является ли пользователь последним администратором
     if (existingUser.role === "admin") {
-      const adminCount = await db
-        .select()
-        .from(users)
-        .where(eq(users.role, "admin"))
-        .then((res) => res.length)
+      const adminCount = await pool
+        .query('SELECT COUNT(*) FROM users WHERE role = $1', ['admin'])
+        .then((res) => parseInt(res.rows[0].count))
 
       if (adminCount === 1) {
         return NextResponse.json(
@@ -192,7 +186,7 @@ export async function DELETE(request: NextRequest, { params }: { params: { id: s
     }
 
     // Удаление пользователя
-    await db.delete(users).where(eq(users.id, id))
+    await pool.query('DELETE FROM users WHERE id = $1', [id])
 
     return NextResponse.json({
       success: true,
